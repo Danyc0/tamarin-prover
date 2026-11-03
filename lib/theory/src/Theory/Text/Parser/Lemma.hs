@@ -13,6 +13,7 @@ module Theory.Text.Parser.Lemma(
       , plainLemma
       , lemmaWithMsig
       , diffLemma
+      , traceQuantifier
 )
 where
 

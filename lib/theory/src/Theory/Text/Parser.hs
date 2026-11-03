@@ -226,6 +226,56 @@ evalformula flags0 (FOr t1 t2) = (evalformula flags0 t1) || (evalformula flags0 
 evalformula flags0 (FAnd t1 t2) = (evalformula flags0 t1) && (evalformula flags0 t2)
 evalformula flags0 (FNested t) = evalformula flags0 t
 
+-- | Parse an @#ifdef@ block, using the given parser for the included branch.
+ifdef :: (a -> Parser a) -> a -> Parser a
+ifdef items thy = do
+    flagf <- symbol_ "#ifdef" *> flagdisjuncts
+    flags0 <- flags <$> getState
+    if evalformula flags0 flagf
+      then items thy <* (symbol_ "#else" *> skipElse <|> symbol_ "#endif")
+      else do hasElse <- skipBranch
+              if hasElse then items thy <* symbol_ "#endif" else return thy
+
+-- | Skip to this block's @#else@ (True) or @#endif@ (False), including nested
+-- blocks.
+skipBranch :: Parser Bool
+skipBranch = do
+    _ <- manyTill (skipItem <?> "") (try (symbol_ "#") <?> "\"#endif\"")
+    asum [ True <$ reserved "else"
+         , False <$ reserved "endif"
+         , do reserved "ifdef"
+              hasElse <- skipBranch
+              when hasElse skipElse
+              skipBranch
+         , skipBranch
+         ]
+
+-- | Skip from an @#else@ to its @#endif@.
+skipElse :: Parser ()
+skipElse = skipBranch >>= (`when` unexpected "#else")
+
+-- | Skip a string, quoted literal, formal comment, word or single character,
+-- and any following whitespace and comments. As in the parser, a formula
+-- string may contain comments, export text uses @\\@ escapes and other strings
+-- are taken literally.
+skipItem :: Parser ()
+skipItem = lexeme $ asum
+    [ try (void formalComment)
+    , try $ reserved "export" *> identifier *> colon
+        *> quoted '"' (noneOf "\\\"" <|> char '\\' *> anyChar)
+    , (colon <|> reserved "for") *> optional traceQuantifier
+        *> optional (try formula)
+    , literal
+    , quoted '"' (noneOf "\"")
+    , void (many1 letter)
+    , void anyChar
+    ]
+  where
+    quoted q c  = try $ void $ char q *> many c *> char q
+    literal     = quoted '\'' (noneOf "'\n")
+    formula     = symbol "\"" *> manyTill (lexeme formulaItem) (char '"')
+    formulaItem = asum [literal, void (many1 (noneOf "\"'/")), void anyChar]
+
 -- | Parse a theory.
 theory :: Maybe FilePath
        -> Parser OpenTheory
@@ -301,7 +351,8 @@ theory inFile = do
            addItems inFile0 (thy')
       , do thy'  <- export thy
            addItems inFile0 (thy')
-      , do ifdef inFile0 thy
+      , do thy' <- ifdef (addItems inFile0) thy
+           addItems inFile0 thy'
       , do define inFile0 thy
       , do include inFile0 thy
       , do return thy
@@ -346,33 +397,6 @@ theory inFile = do
               Just s ->  do
                 x <- doubleQuoted filePath
                 return (s </> x)
-
-    ifdef :: Maybe FilePath -> OpenTheory ->  Parser OpenTheory
-    ifdef inFile0 thy = do
-       flagf <- symbol_ "#ifdef" *> flagdisjuncts
-       flags0 <- flags <$> getState
-       if evalformula flags0 flagf
-         then do thy' <- addItems inFile0 thy
-                 asum [do symbol_ "#else"
-                          _ <- manyTill anyChar (try (symbol_ "#endif"))
-                          addItems inFile0 thy'
-                       ,do symbol_ "#endif"
-                           addItems inFile0 thy'
-                      ]
-
-         else parseelse
-         where
-           parseelse =
-             do _ <- manyTill anyChar (try (symbol_ "#"))
-                asum
-                 [do (symbol_ "else")
-                     thy' <- addItems inFile0 thy
-                     symbol_ "#endif"
-                     addItems inFile0 thy'
-                 ,do _ <- symbol_ "endif"
-                     addItems inFile0 thy
-                 , parseelse
-                 ]
 
     -- check process defined only once
     -- add process to theoryitems
@@ -446,7 +470,8 @@ diffTheory inFile = do
            addItems inFile0 (addIntrRuleACsDiffAll [r] thy)
       , do c <- formalComment
            addItems inFile0 (addFormalCommentDiff c thy)
-      , do ifdef inFile0 thy
+      , do thy' <- ifdef (addItems inFile0) thy
+           addItems inFile0 thy'
       , do define inFile0 thy
       , do include inFile0 thy
       , do return thy
@@ -458,33 +483,6 @@ diffTheory inFile = do
        flag <- try (symbol "#define") *> identifier
        modifyStateFlag (S.insert flag)
        addItems inFile0 thy
-
-    ifdef :: Maybe FilePath -> OpenDiffTheory ->  Parser OpenDiffTheory
-    ifdef inFile0 thy = do
-       flagf <- symbol_ "#ifdef" *> flagdisjuncts
-       flags0 <- flags <$> getState
-       if evalformula flags0 flagf
-         then do thy' <- addItems inFile0 thy
-                 asum [do symbol_ "#else"
-                          _ <- manyTill anyChar (try (symbol_ "#endif"))
-                          addItems inFile0 thy'
-                       ,do symbol_ "#endif"
-                           addItems inFile0 thy'
-                      ]
-
-         else parseelse
-         where
-           parseelse =
-             do _ <- manyTill anyChar (try (symbol_ "#"))
-                asum
-                 [do (symbol_ "else")
-                     thy' <- addItems inFile0 thy
-                     symbol_ "#endif"
-                     addItems inFile0 thy'
-                 ,do _ <- symbol_ "endif"
-                     addItems inFile0 thy
-                 , parseelse
-                 ]
 
     include :: Maybe FilePath -> OpenDiffTheory -> Parser OpenDiffTheory
     include inFile0 thy = do
